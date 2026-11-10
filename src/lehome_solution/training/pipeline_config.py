@@ -443,6 +443,10 @@ class RLPipelineConfig:
     # Advantage computation
     advantage: AdvantageConfig = dataclasses.field(default_factory=AdvantageConfig)
 
+    # AWR ablation: False = prioritized sampling + unweighted action loss (default).
+    # True = uniform RL sampling + exp(clip(A)) weights on the action FM loss.
+    awr_loss_weighted: bool = False
+
     # Per-garment precision boost (runs after advantage computation in
     # recompute_advantages.py; no-op when boost=0).
     precision_boost: PrecisionBoostConfig = dataclasses.field(default_factory=PrecisionBoostConfig)

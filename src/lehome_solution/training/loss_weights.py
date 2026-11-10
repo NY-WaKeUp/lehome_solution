@@ -26,6 +26,12 @@ import jax.numpy as jnp
 from lehome_solution.constants import NUM_GARMENT_TYPES
 
 
+def normalized_exp_advantage_weights(advantage):
+    """Batch-normalize exp(advantage). ``advantage`` must already be clipped."""
+    raw = jnp.exp(advantage)
+    return raw / jnp.sum(raw)
+
+
 def type_balanced_weighted_mean(loss, weights, valid, garment_type_id):
     """Weighted mean within each garment type, then unweighted mean across types.
 

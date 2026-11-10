@@ -39,7 +39,7 @@ save_debug_video: true  # 3-cam grid + overlay video per episode (320x240, human
 use_advantage_embedding: true  # Enable advantage embedding conditioning in model
 freeze_vision_backbone: true   # Keep SigLIP vision encoder frozen
 use_flash_attention: true  # flash attention (~6% speedup over vanilla)
-use_xsa: true              # Exclusive Self Attention (https://arxiv.org/abs/2603.09078)
+use_xsa: false              # Exclusive Self Attention (https://arxiv.org/abs/2603.09078)
 
 # Auxiliary loss weights (main flow-matching `action` loss is always 1.0).
 # Any field omitted / set to null inherits the model's dataclass default.
@@ -149,6 +149,10 @@ advantage:
   completion_alpha: 0.5  # Weight on GAE_completion (reward-free GAE over completion head); 0 disables
   value_tail_k: 30       # Linearly interp EMA(P_success) over last K frames to true success label; 0 disables
 
+# AWR mode: false = prioritized sampling + unweighted action loss (default).
+# true = uniform RL sampling + exp(clip(A)) on action FM loss (see configs/rl_pipeline_sim_loss_weighted.yaml).
+awr_loss_weighted: false
+
 # Per-garment precision boost.  After advantage computation, rank successful
 # episodes PER GARMENT by the binding-condition margin on the final
 # check_distances and add `boost` to every frame's advantage for the top
@@ -159,7 +163,7 @@ precision_boost:
   min_successes: 5
 
 # Wandb
-wandb_enabled: true
+wandb_enabled: false
 
 # Training overrides
 batch_size: 192
@@ -174,12 +178,12 @@ train_augmentation:
   state_noise_std: 0.02
 
 # HF sync daemon (background uploads/downloads)
-hf_sync_enabled: true
+hf_sync_enabled: false
 
 # HuggingFace Hub message bus — set to your own repos (trainer pushes
 # checkpoints to hf_model_repo, pulls rollout datasets from hf_dataset_repo).
-hf_model_repo: <your-hf-username>/<model-repo>
-hf_dataset_repo: <your-hf-username>/<dataset-repo>
+hf_model_repo: null
+hf_dataset_repo: null
 
 # Inference hyperparameter optimization (Thompson Sampling).
 # Per-garment fixed configs take precedence over Thompson Sampling whether

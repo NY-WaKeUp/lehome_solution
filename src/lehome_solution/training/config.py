@@ -36,6 +36,7 @@ from lehome_solution.shared import normalize as _normalize
 from lehome_solution.training import weight_loaders
 from lehome_solution import transforms as lehome_transforms
 from lehome_solution.constants import ACTION_HORIZON, ACTION_DIM
+import jax.numpy as jnp
 
 ModelType: TypeAlias = _model.ModelType
 
@@ -114,7 +115,8 @@ class AdamWWithAuxDecay(_optimizer.OptimizerConfig):
     ) -> optax.GradientTransformation:
         chain: list[optax.GradientTransformation] = [
             optax.clip_by_global_norm(self.clip_gradient_norm),
-            optax.scale_by_adam(b1=self.b1, b2=self.b2, eps=self.eps),
+            # mu in bf16 halves first-moment VRAM (legacy AdamWBF16 behavior).
+            optax.scale_by_adam(b1=self.b1, b2=self.b2, eps=self.eps, mu_dtype=jnp.bfloat16),
             optax.add_decayed_weights(self.weight_decay),
         ]
         if weight_decay_mask is not None and self.aux_head_weight_decay > 0:
@@ -300,6 +302,10 @@ class LeRobotLeHomeDataConfig(DataConfigFactory):
     # Clipping range (min, max) for advantage weighting: exp(clip(advantage, min, max)).
     # Controls prioritized sampling and IS weights. (0, 0) = uniform sampling.
     advantage_weighting_clipping: tuple[float, float] = (-2.0, 2.0)
+
+    # When True: disable RL prioritized sampling; train.py weights action loss by
+    # exp(clip(A)). When False (default): sampler AWR, unweighted action mean.
+    awr_loss_weighted: bool = False
 
     # Multi-dataset sources. When set, a MultiDataset is built at training time
     # instead of a single LeRobotDataset, eliminating the merge step.
@@ -507,6 +513,8 @@ class LeRobotLeHomeDataConfig(DataConfigFactory):
             for spec in self.data_sources:
                 bc_advantage_raw = None
                 use_prioritized = True
+                if self.awr_loss_weighted:
+                    use_prioritized = False  # Loss-weighted AWR: uniform RL sampling
                 if spec.is_bc and self.use_advantages:
                     bc_advantage_raw = self.bc_advantage
                     use_prioritized = False  # BC uses FR-proportional or uniform

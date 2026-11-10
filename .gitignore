@@ -17,3 +17,6 @@ assets/
 submission/
 diag_out/
 .claude/
+
+# Local conversation notes
+doc/

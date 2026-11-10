@@ -135,7 +135,7 @@ def _start_hf_sync_daemon(
     _cleanup_stale_daemon(sync_dir)
 
     cmd = [
-        "uv", "run", "python", str(REPO_ROOT / "scripts" / "hf_sync_daemon.py"),
+        "uv", "run", "--no-sync", "python", str(REPO_ROOT / "scripts" / "hf_sync_daemon.py"),
         "--sync_dir", str(sync_dir),
         "--parent_pid", str(os.getpid()),
         "--mode", mode,
@@ -340,6 +340,7 @@ def build_train_config(pipeline_cfg: RLPipelineConfig, state: dict):
         data_sources=tuple(data_sources),
         assets=new_assets,
         advantage_weighting_clipping=wc,
+        awr_loss_weighted=pipeline_cfg.awr_loss_weighted,
         bc_advantage=pipeline_cfg.bc_dataset.bc_advantage,
         dagger_advantage=pipeline_cfg.dagger_dataset.dagger_advantage,
         pct_real=pipeline_cfg.pct_real,
@@ -378,6 +379,15 @@ def build_train_config(pipeline_cfg: RLPipelineConfig, state: dict):
     if aux_overrides:
         model = dataclasses.replace(model, **aux_overrides)
 
+    # Local 24GB×2 warmup: drop keypoint/WM heads to shrink the train-step graph.
+    # Re-enable for full sim recipe once VRAM path is proven.
+    model = dataclasses.replace(
+        model,
+        use_keypoint_distance_head=False,
+        use_wm_fast_head=False,
+        use_wm_flow_head=False,
+    )
+
     return dataclasses.replace(
         base,
         data=new_data,
@@ -394,6 +404,10 @@ def build_train_config(pipeline_cfg: RLPipelineConfig, state: dict):
         assets_base_dir=checkpoint_assets,
         use_flash_attention=pipeline_cfg.use_flash_attention,
         use_xsa=pipeline_cfg.use_xsa,
+        # Dual-GPU FSDP to fit params/opt; tiny batch for activation VRAM.
+        ema_decay=None,
+        fsdp_devices=2,
+        num_flow_samples=1,
     )
 
 
@@ -444,7 +458,7 @@ def run_training(pipeline_cfg: RLPipelineConfig, state: dict) -> bool:
                 phase, config.num_train_steps, len(config.data.data_sources),
                 state["bc_sampling_share"], len(state["rl_datasets"]), n_dagger)
 
-    cmd = ["uv", "run", "python", "scripts/train.py", "--config_file", str(config_file)]
+    cmd = ["uv", "run", "--no-sync", "python", "scripts/train.py", "--config_file", str(config_file)]
 
     log_path = _log_path(state["checkpoint_dir"], logcfg.TRAINING, f"train_{phase}.log")
     rc = _run_subprocess(cmd, log_path, label=f"train/{phase}", tail_patterns=[
@@ -527,7 +541,7 @@ def _run_single_rollout(
     """Run one rollout collection. Returns eval_dataset path or None."""
     num_episodes = num_episodes_override or pipeline_cfg.num_episodes
     cmd = [
-        "uv", "run", "python", "scripts/run_eval.py",
+        "uv", "run", "--no-sync", "python", "scripts/run_eval.py",
         "--checkpoint_dir", checkpoint_dir,
         "--config_name", pipeline_cfg.config_name,
         "--num_episodes", str(num_episodes),
@@ -1064,7 +1078,7 @@ def recompute_advantages(pipeline_cfg: RLPipelineConfig, state: dict) -> bool:
             force_segment_dirs.append(root)
 
     cmd = [
-        "uv", "run", "python", "scripts/recompute_advantages.py",
+        "uv", "run", "--no-sync", "python", "scripts/recompute_advantages.py",
         "--eval_dirs", *dirs,
         "--sampling_shares", *[str(w) for w in weights],
         "--mode", mode,

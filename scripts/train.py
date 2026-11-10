@@ -59,7 +59,10 @@ from lehome_solution.training import attention_backend as _attention_backend
 
 from lehome_solution.models.pi_modified import PiModified
 from lehome_solution.models.observation import Observation
-from lehome_solution.training.loss_weights import type_balanced_weighted_mean
+from lehome_solution.training.loss_weights import (
+    normalized_exp_advantage_weights,
+    type_balanced_weighted_mean,
+)
 
 
 # ── HF upload background machinery ────────────────────────────────────────
@@ -256,7 +259,8 @@ def init_train_state(
             model = nnx.merge(graphdef, state)
 
         params = nnx.state(model)
-        params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
+        # Cast every Param to bf16 (not only frozen). Cuts param+grad VRAM ~2x on 24GB GPUs.
+        params = nnx_utils.state_map(params, nnx.Param, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
         return training_utils.TrainState(
             step=0,
             params=params,
@@ -274,14 +278,14 @@ def init_train_state(
         return train_state_shape, state_sharding
 
     partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
-    replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
-    train_state = jax.jit(
-        init,
-        donate_argnums=(1,),
-        in_shardings=replicated_sharding,
-        out_shardings=state_sharding,
-    )(init_rng, partial_params)
+    # Avoid a peak-VRAM spike from jitting replicated full weights + FSDP opt state on GPU.
+    # Initialize on CPU, then device_put with the target FSDP sharding.
+    cpu = jax.devices("cpu")[0]
+    partial_params_cpu = jax.tree.map(lambda x: jax.device_put(x, cpu), partial_params)
+    with jax.default_device(cpu):
+        train_state = init(init_rng, partial_params_cpu)
+    train_state = jax.device_put(train_state, state_sharding)
 
     return train_state, state_sharding
 
@@ -315,6 +319,7 @@ _TRAIN_METRIC_KEYS = {
     "ttc_bootstrap_frac", "ttc_weight_scale_mean",
     "grad_norm", "param_norm",
     "weight_mean", "weight_min", "weight_max",
+    "awr_weight_mean", "awr_weight_min", "awr_weight_max",
     # Keypoint + world-modeling head metrics. keypoint_distance_valid_frac is
     # a SINGLE shared metric across all 3 heads (Head 1 current + Heads 2/3
     # future). wm_flow_t_valid_frac shows the share of batch samples with at
@@ -407,9 +412,23 @@ def train_step(
         per_sample_loss = losses_dict["total_loss"]  # [B]
         B = per_sample_loss.shape[0]
         ones_b = jnp.ones_like(per_sample_loss)
-        # action + fast losses: unweighted batch mean, no type balancing.
-        # Sampling distribution (prioritised / FR-proportional) is the training signal.
-        total_loss = jnp.mean(per_sample_loss)
+        # Default (sampler AWR): unweighted mean of action+fast; sampling is the signal.
+        # Loss-weighted AWR: uniform sampling + exp(clip(A)) on action only; fast stays mean.
+        if getattr(config.data, "awr_loss_weighted", False):
+            action_loss = losses_dict["action_loss"]  # [B]
+            raw_w = jnp.exp(observation.advantage)
+            w = normalized_exp_advantage_weights(observation.advantage)
+            action_term = jnp.sum(w * action_loss)
+            if "fast_loss" in losses_dict:
+                fast_term = config.model.fast_loss_weight * jnp.mean(losses_dict["fast_loss"])
+            else:
+                fast_term = jnp.float32(0.0)
+            total_loss = action_term + fast_term
+            losses_dict["awr_weight_mean"] = jnp.mean(raw_w) * ones_b
+            losses_dict["awr_weight_min"] = jnp.min(raw_w) * ones_b
+            losses_dict["awr_weight_max"] = jnp.max(raw_w) * ones_b
+        else:
+            total_loss = jnp.mean(per_sample_loss)
 
         # ── Auxiliary losses: unified IS-weighted × per-garment debias × type-balanced ──
         # is_weight = (1 / (N * p_i)) / ep_len — set uniformly for every source in
@@ -870,7 +889,23 @@ def main(config: _config.TrainConfig):
 
             main_metrics = {k: v for k, v in reduced_info.items()
                           if k in _TRAIN_LOSS_KEYS | _TRAIN_METRIC_KEYS | {"loss"}}
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in main_metrics.items())
+            # 0-d bf16 arrays use ml_dtypes; dtype.kind is not always in biufc.
+            numeric_metrics = {}
+            non_numeric = {}
+            for k, v in main_metrics.items():
+                if isinstance(v, (str, bytes)):
+                    non_numeric[k] = (type(v).__name__, repr(v)[:120])
+                    continue
+                if isinstance(v, (int, float)):
+                    numeric_metrics[k] = float(v)
+                    continue
+                if hasattr(v, "item") and getattr(v, "ndim", None) == 0:
+                    numeric_metrics[k] = float(v.item())
+                    continue
+                non_numeric[k] = (type(v).__name__, repr(v)[:120])
+            if non_numeric:
+                logging.warning("Non-numeric train metrics skipped in console: %s", non_numeric)
+            info_str = ", ".join(f"{k}={v:.4f}" for k, v in numeric_metrics.items())
             logging.info(f"Step {step}: {info_str}")
 
             wandb.log(_structure_metrics(reduced_info), step=step)
