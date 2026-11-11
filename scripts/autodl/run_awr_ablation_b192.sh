@@ -32,7 +32,7 @@ mkdir -p /root/autodl-tmp/ablation logs
   echo "MAX_OK=192 (probe 160/176/192 all OK; peak~70GB VRAM / ~83GiB cgroup)"
   echo "fresh_start: new exp names; do NOT hard-resume b128/ckpt500 into different batch"
   echo "history_kept: sim_rl_awr_sample_b128/500 (~12G) retained as archive"
-  echo "disk_policy: save_interval=500 keep_period=5000 max_to_keep=1 disk_guard thresh=15G"
+  echo "disk_policy: save_interval=500 keep_period=5000 max_to_keep=1 sync_orbax=1 disk_guard thresh=15G (never purge in-flight orbax-tmp while train.py runs)"
   echo "fix: seed checkpoint assets (norm_stats) for fresh --exp_name"
 } > "$STATUS"
 

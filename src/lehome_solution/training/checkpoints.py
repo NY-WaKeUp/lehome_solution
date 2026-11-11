@@ -58,6 +58,10 @@ def initialize_checkpoint_dir(
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    # Sync saves: async OCDBT writes can race / leave *.orbax-checkpoint-tmp*
+    # that disk cleaners may delete mid-write (ENOENT on __lock rename), with
+    # the failure only surfacing on the next save's wait_until_finished.
+    # Docs: https://orbax.readthedocs.io/en/latest/guides/checkpoint/async_checkpointing.html
     mngr = ocp.CheckpointManager(
         checkpoint_dir,
         item_handlers={
@@ -69,7 +73,7 @@ def initialize_checkpoint_dir(
             max_to_keep=1,
             keep_period=keep_period,
             create=False,
-            async_options=ocp.AsyncOptions(timeout_secs=7200),
+            enable_async_checkpointing=False,
         ),
     )
 
