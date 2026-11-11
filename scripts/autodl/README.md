@@ -29,3 +29,21 @@ bash /root/autodl-tmp/lehome_solution/scripts/autodl/mac_proxy.sh test
 ```
 
 - Do **not** use AutoDL side `10.7.26.129:7890` as the default (timeouts / fails for GitHub).
+
+## Checkpoint offload (HFSync sidecar)
+
+There is **no** standalone `hfsync` binary. In this repo, "hfsync" means the
+HuggingFace sync path (`HFSyncClient` / `hf_sync_daemon.py`). The current AWR
+sim config has `hf_sync_enabled: false` — do **not** restart a live train just
+to flip it. Use the sidecar instead:
+
+```bash
+export HF_TOKEN=hf_xxx
+export HF_MODEL_REPO=YourUser/awr-b192-vanilla-ckpt
+# optional: export HF_ENDPOINT=https://hf-mirror.com
+nohup bash /root/autodl-tmp/lehome_solution/scripts/autodl/hfsync_finalized_ckpt.sh watch \
+  >> /root/autodl-tmp/ablation/hfsync_ckpt.log 2>&1 &
+```
+
+Policy: only sync finalized digit dirs with `params/`; never touch
+`*.orbax-checkpoint-tmp*`. Safe alongside `disk_guard.sh`.
