@@ -1,0 +1,8 @@
+# AWR ablation start 2026-11-11T05:06:00+08:00 batch=128
+## sampling (awr_loss_weighted=false)
+sampling exit=0 2026-11-11T05:14:24+08:00
+2026-11-11 05:08:02,101 [INFO] [train/iter0] 05:08:01.655 [I] Step 0: action_loss=2.0741, action_pad_frac=0.0510, checkpoint_loss=0.0000, checkpoint_pred_mean=0.8458, checkpoint_pred_mean_weighted=0.0000, checkpoint_target_mean_weighted=0.0000, completion_loss=0.0977, completion_pred_mean=0.5210, completion_pred_mean_weighted=0.0000, completion_target_mean_weighted=0.0000, fast_loss=7.9062, fast_perplexity=2720.0000, garment_type_accuracy=0.9219, garment_type_loss=0.6055, grad_norm=23.0000, keypoint_distance_loss=0.0000, keypoint_distance_mae=0.0000, keypoint_distance_valid_frac=0.0000, loss=2.1655, param_norm=1800.0000, success_loss=0.0000, success_mae=0.0000, success_pred_mean=0.0000, success_pred_mean_weighted=0.0000, success_pred_std=0.0000, success_target_mean=0.0000, success_target_mean_weighted=0.0000, success_valid_frac=0.0000, ttc_bootstrap_frac=0.0000, ttc_loss=0.0000, ttc_pred_mean=0.1480, ttc_pred_mean_weighted=0.0000, ttc_target_mean=0.0000, ttc_target_mean_weighted=0.0000, ttc_valid_frac=0.0000, ttc_weight_scale_mean=1.0000, wm_fast_completion_loss=0.0000, wm_fast_keypoint_loss=0.0000, wm_fast_success_loss=0.0000, wm_flow_completion_loss=0.0000, wm_flow_keypoint_loss=0.0000, wm_flow_success_loss=0.0000, wm_flow_success_pred_mean=0.1284, wm_flow_success_pred_std=0.4868, wm_flow_success_target_mean=0.0000, wm_flow_t_valid_frac=0.3578 (53131:train.py:909)
+2026-11-11 05:14:23,155 [INFO] Training complete. Latest checkpoint: step 32
+2026-11-11 05:14:23,155 [INFO] Training complete. Latest: step 32
+/dev/md127       50G   30G   21G  59% /root/autodl-tmp
+DONE_ABLATION_SAMPLING 2026-11-11T05:14:24+08:00
