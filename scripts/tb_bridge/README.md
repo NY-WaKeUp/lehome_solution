@@ -1,6 +1,7 @@
-# TensorBoard bridge
+# tb_bridge
 
-`log_to_tb.py` parses training logs and writes TensorBoard event files when
-native TB logging is unavailable or blocked.
+Bypass console logs -> TensorBoard under `/root/tf-logs` (AutoDL AutoPanel port 6007).
 
-On AutoDL, `/root/autodl-tmp/tb-bridge/log_to_tb.py` is a symlink to this file.
+- Parses every numeric `k=v` on `Step N:` lines as `train/<k>` (plus top-level `loss`).
+- Between `log_interval` Steps, carries the latest full metric set onto each Progress `it`.
+- Also writes `progress/it` and `timing/*`. Does not touch the training process.

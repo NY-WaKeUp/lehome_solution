@@ -4,9 +4,9 @@
 Does not touch the training process. Tails log files and writes scalars so
 AutoDL AutoPanel TensorBoard (pinned to /root/tf-logs, port 6007) shows curves.
 
-Console loss lines only appear every config.log_interval (default 100). Between
-those Step lines we carry forward the last known metrics onto Progress it so
-the loss curve keeps updating in TB.
+Console metric lines only appear every config.log_interval (default 100). Between
+those Step lines we carry forward the last known full metric set onto Progress it
+so every train/* curve keeps updating in TB.
 """
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ TIMING_RE = re.compile(
     r"TIMING \[last 10 steps\]:\s*gpu=([0-9.]+)s,\s*data=([0-9.]+)s,\s*total=([0-9.]+)s/step"
 )
 
-# Prefer dense progress-driven loss points; Step lines still win when present.
-PROGRESS_LOSS_EVERY = 1
+# Prefer dense progress-driven metric points; Step lines still win when present.
+PROGRESS_METRIC_EVERY = 1
 PROGRESS_IT_EVERY = 1
 
 
@@ -56,10 +56,10 @@ def ingest_file(
 
     runtime keys:
       last_progress[path] -> last progress it written for progress/it
-      last_loss_prog[path] -> last progress it used for carry-forward loss
+      last_metric_prog[path] -> last progress it used for carry-forward metrics
       last_metrics -> shared last Step metrics dict
       last_it -> shared latest progress it (for TIMING x-axis)
-      written_loss_steps -> set of steps that already got a real/carried loss
+      written_metric_steps -> set of steps that already got a real/carried metric write
     """
     written = 0
     seen_max = -1
@@ -71,8 +71,8 @@ def ingest_file(
     if size < offset:
         offset = 0
     last_progress: dict = runtime["last_progress"]
-    last_loss_prog: dict = runtime["last_loss_prog"]
-    written_loss_steps: set = runtime["written_loss_steps"]
+    last_metric_prog: dict = runtime["last_metric_prog"]
+    written_metric_steps: set = runtime["written_metric_steps"]
 
     with path.open("r", errors="replace") as f:
         f.seek(offset)
@@ -87,7 +87,7 @@ def ingest_file(
                     runtime["last_metrics"] = dict(metrics)
                     runtime["last_it"] = max(runtime.get("last_it", -1), step)
                     write_metrics(writer, step, metrics)
-                    written_loss_steps.add(step)
+                    written_metric_steps.add(step)
                     written += 1
                 continue
 
@@ -102,24 +102,18 @@ def ingest_file(
                     writer.add_scalar("progress/it", step, step)
                     last_progress[key] = step
                     written += 1
-                # Carry forward last known loss so TB loss keeps moving before
-                # the next log_interval Step line arrives.
+                # Carry forward last known full metric set so TB curves keep
+                # moving before the next log_interval Step line arrives.
                 metrics = runtime.get("last_metrics") or {}
-                prev_loss_it = last_loss_prog.get(key, -10**9)
+                prev_metric_it = last_metric_prog.get(key, -10**9)
                 if (
                     metrics
-                    and "loss" in metrics
-                    and step - prev_loss_it >= PROGRESS_LOSS_EVERY
-                    and step not in written_loss_steps
+                    and step - prev_metric_it >= PROGRESS_METRIC_EVERY
+                    and step not in written_metric_steps
                 ):
-                    writer.add_scalar("loss", metrics["loss"], step)
-                    writer.add_scalar("train/loss", metrics["loss"], step)
-                    if "action_loss" in metrics:
-                        writer.add_scalar(
-                            "train/action_loss", metrics["action_loss"], step
-                        )
-                    last_loss_prog[key] = step
-                    written_loss_steps.add(step)
+                    write_metrics(writer, step, metrics)
+                    last_metric_prog[key] = step
+                    written_metric_steps.add(step)
                     written += 1
                 continue
 
@@ -162,10 +156,10 @@ def main():
     state: dict = {}
     runtime = {
         "last_progress": {},
-        "last_loss_prog": {},
+        "last_metric_prog": {},
         "last_metrics": {},
         "last_it": -1,
-        "written_loss_steps": set(),
+        "written_metric_steps": set(),
     }
     total_writes = 0
     global_max = -1
@@ -184,13 +178,20 @@ def main():
         if batch:
             writer.flush()
             total_writes += batch
-            loss_steps = sorted(runtime["written_loss_steps"])
-            last_loss = (runtime.get("last_metrics") or {}).get("loss")
+            metric_steps = sorted(runtime["written_metric_steps"])
+            last_metrics = runtime.get("last_metrics") or {}
             print(
-                f"[log_to_tb] wrote {batch} step-lines; "
-                f"total_writes={total_writes}; max_step={global_max}; "
-                f"loss_points={len(loss_steps)}; last_loss={last_loss}; "
-                f"last_it={runtime.get('last_it')}",
+                "[log_to_tb] wrote %d step-lines; total_writes=%d; max_step=%s; "
+                "metric_points=%d; last_loss=%s; n_keys=%d; last_it=%s"
+                % (
+                    batch,
+                    total_writes,
+                    global_max,
+                    len(metric_steps),
+                    last_metrics.get("loss"),
+                    len(last_metrics),
+                    runtime.get("last_it"),
+                ),
                 flush=True,
             )
         if args.once:
@@ -199,7 +200,10 @@ def main():
 
     writer.flush()
     writer.close()
-    print(f"[log_to_tb] done. total_writes={total_writes} max_step={global_max}", flush=True)
+    print(
+        "[log_to_tb] done. total_writes=%d max_step=%s" % (total_writes, global_max),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
