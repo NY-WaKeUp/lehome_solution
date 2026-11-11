@@ -36,6 +36,7 @@ from lehome_solution.shared import normalize as _normalize
 from lehome_solution.training import weight_loaders
 from lehome_solution import transforms as lehome_transforms
 from lehome_solution.constants import ACTION_HORIZON, ACTION_DIM
+import jax.numpy as jnp
 
 ModelType: TypeAlias = _model.ModelType
 
@@ -106,15 +107,21 @@ class AdamWWithAuxDecay(_optimizer.OptimizerConfig):
     weight_decay: float = 1e-10          # openpi default (avoids 0.0 OOM edge case)
     aux_head_weight_decay: float = 0.001  # extra decay on aux-head params (replaces head_l2)
     clip_gradient_norm: float = 1.0
+    # True on 24GB dual-GPU (Aserver): mu in bf16 halves first-moment VRAM
+    # (legacy AdamWBF16 / commit 91b3a3a). Keep False for A800@b192 fairness.
+    mu_dtype_bf16: bool = False
 
     def create(
         self,
         lr,
         weight_decay_mask=None,
     ) -> optax.GradientTransformation:
+        adam_kwargs: dict[str, Any] = {"b1": self.b1, "b2": self.b2, "eps": self.eps}
+        if self.mu_dtype_bf16:
+            adam_kwargs["mu_dtype"] = jnp.bfloat16
         chain: list[optax.GradientTransformation] = [
             optax.clip_by_global_norm(self.clip_gradient_norm),
-            optax.scale_by_adam(b1=self.b1, b2=self.b2, eps=self.eps),
+            optax.scale_by_adam(**adam_kwargs),
             optax.add_decayed_weights(self.weight_decay),
         ]
         if weight_decay_mask is not None and self.aux_head_weight_decay > 0:

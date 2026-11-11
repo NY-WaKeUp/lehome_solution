@@ -379,10 +379,9 @@ def build_train_config(pipeline_cfg: RLPipelineConfig, state: dict):
     if aux_overrides:
         model = dataclasses.replace(model, **aux_overrides)
 
-    # Train dynamics aligned to Ilia defaults: ema_decay from TrainConfig (0.99),
-    # dataloader num_workers from _BASE_TRAIN_CONFIG (8), flow/fsdp from base.
-    return dataclasses.replace(
-        base,
+    # Train dynamics: dataloader num_workers from _BASE_TRAIN_CONFIG (8).
+    # fsdp / flow / ema come from pipeline YAML when set (Aserver 4090 overlay).
+    replace_kwargs = dict(
         data=new_data,
         model=model,
         exp_name=pipeline_cfg.exp_name,
@@ -397,7 +396,17 @@ def build_train_config(pipeline_cfg: RLPipelineConfig, state: dict):
         assets_base_dir=checkpoint_assets,
         use_flash_attention=pipeline_cfg.use_flash_attention,
         use_xsa=pipeline_cfg.use_xsa,
+        ema_decay=pipeline_cfg.ema_decay,
     )
+    if pipeline_cfg.fsdp_devices is not None:
+        replace_kwargs["fsdp_devices"] = pipeline_cfg.fsdp_devices
+    if pipeline_cfg.num_flow_samples is not None:
+        replace_kwargs["num_flow_samples"] = pipeline_cfg.num_flow_samples
+    if pipeline_cfg.adam_mu_bf16:
+        replace_kwargs["optimizer"] = dataclasses.replace(
+            base.optimizer, mu_dtype_bf16=True
+        )
+    return dataclasses.replace(base, **replace_kwargs)
 
 
 

@@ -468,6 +468,14 @@ class RLPipelineConfig:
 
     # Training overrides
     batch_size: int | None = None
+    # None → keep TrainConfig / base defaults. Set explicitly in hardware overlays
+    # (e.g. Aserver 2x4090 needs fsdp_devices=2, ema_decay=null).
+    fsdp_devices: int | None = None
+    num_flow_samples: int | None = None
+    # Default matches TrainConfig.ema_decay (0.99). YAML null disables EMA.
+    ema_decay: float | None = 0.99
+    # Adam first-moment in bf16 (24GB path). False keeps A800/Ilia fp32 mu.
+    adam_mu_bf16: bool = False
     save_interval: int = 500
     keep_period: int = 5000
 
