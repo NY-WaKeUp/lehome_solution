@@ -1,30 +1,43 @@
 #!/usr/bin/env bash
 # Sidecar offload for AutoDL AWR: sync ONLY finalized Orbax checkpoints + small
-# artifacts to Hugging Face Hub (this repo's HFSync destination), without
-# touching in-flight *.orbax-checkpoint-tmp* and without stopping train.py.
+# artifacts to Hugging Face Hub, without touching in-flight
+# *.orbax-checkpoint-tmp* and without stopping train.py.
 #
 # Why sidecar (not enabling pipeline hf_sync mid-run):
 #   configs/rl_pipeline_sim.yaml has hf_sync_enabled=false / hf_model_repo=null.
 #   Flipping that requires a pipeline restart. This watcher attaches to a live run.
 #
+# AutoDL disk ceiling (hard constraint; no expand):
+#   /                system disk ~30G (image-persistent) — do NOT put ckpt here
+#   /root/autodl-tmp data disk  ~50G (fast, not in image) — ONLY place for ckpt
+# Under 50G, HF upload+verify then prune local is the PRIMARY retention strategy.
+#
 # Finalize rule (must match disk_guard / Orbax ops docs):
-#   digit-only dir N/ AND N/params/ exists  => safe to sync
+#   digit-only dir N/ AND N/params/ exists  => safe to sync / eligible to prune
 #   *.orbax-checkpoint-tmp*                 => NEVER sync / NEVER delete here
+#
+# Prune policy (default on):
+#   upload -> Hub verify (params[, train_state]) -> delete older local digit dirs
+#   KEEP_LAST=1  keep newest local finalized step for instant resume (recommended)
+#   KEEP_LAST=0  delete all local finalized after verify; resume via `download`
 #
 # Usage (AutoDL):
 #   export HF_TOKEN=hf_xxx
 #   export HF_MODEL_REPO=YourUser/awr-b192-vanilla-ckpt   # private model repo
 #   # optional: export HF_ENDPOINT=https://hf-mirror.com
+#   # optional: KEEP_LAST=1 PRUNE_LOCAL=1 (defaults under 50G)
 #   nohup bash /root/autodl-tmp/lehome_solution/scripts/autodl/hfsync_finalized_ckpt.sh watch \
 #     >> /root/autodl-tmp/ablation/hfsync_ckpt.log 2>&1 &
 #
-# One-shot / dry-run / list:
+# Modes:
 #   bash scripts/autodl/hfsync_finalized_ckpt.sh once
 #   DRY_RUN=1 bash scripts/autodl/hfsync_finalized_ckpt.sh once
 #   bash scripts/autodl/hfsync_finalized_ckpt.sh list
+#   bash scripts/autodl/hfsync_finalized_ckpt.sh download 500
 set -euo pipefail
 
 MODE="${1:-watch}"
+STEP_ARG="${2:-}"
 EXP_DIR="${EXP_DIR:-/root/autodl-tmp/lehome_solution/outputs/checkpoints/pi_modified_bc_rl/sim_rl_awr_sample_b192_vanilla}"
 TB_DIR="${TB_DIR:-/root/tf-logs/sim_rl_awr_sample_b192_vanilla}"
 STATE_FILE="${STATE_FILE:-/root/autodl-tmp/ablation/hfsync_ckpt_state.txt}"
@@ -35,7 +48,11 @@ DRY_RUN="${DRY_RUN:-0}"
 INCLUDE_TRAIN_STATE="${INCLUDE_TRAIN_STATE:-1}"
 ALSO_LOGS="${ALSO_LOGS:-1}"
 ALSO_TB="${ALSO_TB:-1}"
+# After Hub verify: drop local finalized steps outside the newest KEEP_LAST.
+PRUNE_LOCAL="${PRUNE_LOCAL:-1}"
+KEEP_LAST="${KEEP_LAST:-1}"
 HF_BIN="${HF_BIN:-/root/autodl-tmp/lehome_solution/.venv/bin/hf}"
+HF_PY="${HF_PY:-/root/autodl-tmp/lehome_solution/.venv/bin/python}"
 REPO_TYPE="${REPO_TYPE:-model}"
 
 mkdir -p "$(dirname "$STATE_FILE")"
@@ -54,6 +71,10 @@ require_hf_creds() {
   fi
   if [[ ! -x "$HF_BIN" ]]; then
     log "ERROR: hf CLI not executable at $HF_BIN"
+    exit 2
+  fi
+  if [[ ! -x "$HF_PY" ]]; then
+    log "ERROR: python not executable at $HF_PY"
     exit 2
   fi
 }
@@ -164,6 +185,129 @@ upload_small_artifacts() {
   fi
 }
 
+# Fail loud if Hub lacks step/params (and train_state when required).
+verify_step_on_hub() {
+  local step="$1"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "DRY_RUN skip Hub verify for step $step"
+    return 0
+  fi
+  log "verifying Hub path ${step}/params on $HF_MODEL_REPO ..."
+  HF_TOKEN="$HF_TOKEN" HF_MODEL_REPO="$HF_MODEL_REPO" REPO_TYPE="$REPO_TYPE" \
+    STEP="$step" INCLUDE_TRAIN_STATE="$INCLUDE_TRAIN_STATE" \
+    "$HF_PY" - <<'PY'
+import os
+import sys
+from huggingface_hub import HfApi
+
+repo = os.environ["HF_MODEL_REPO"]
+step = os.environ["STEP"]
+repo_type = os.environ["REPO_TYPE"]
+token = os.environ["HF_TOKEN"]
+need_train = os.environ.get("INCLUDE_TRAIN_STATE", "1") == "1"
+
+need = [f"{step}/params"]
+if need_train:
+    need.append(f"{step}/train_state")
+
+api = HfApi(token=token)
+infos = api.get_paths_info(repo, need, repo_type=repo_type)
+found = set()
+for p in infos:
+    path = getattr(p, "path", None)
+    if path is not None:
+        found.add(path)
+missing = [p for p in need if p not in found]
+if missing:
+    print(f"ERROR: Hub missing paths for step {step}: {missing}", file=sys.stderr)
+    print(f"found={sorted(found)}", file=sys.stderr)
+    sys.exit(3)
+print(f"ok: Hub has {sorted(found)}")
+PY
+  log "Hub verify ok for step $step"
+}
+
+# Delete finalized local digit dirs outside the newest KEEP_LAST window.
+# Requires state sync + Hub verify. Never touches *.orbax-checkpoint-tmp*.
+prune_older_local_ckpts() {
+  local -a steps=()
+  local n keep_from i step path
+  if [[ "$PRUNE_LOCAL" != "1" ]]; then
+    log "PRUNE_LOCAL=0 — skip local prune"
+    return 0
+  fi
+  if [[ ! "$KEEP_LAST" =~ ^[0-9]+$ ]]; then
+    log "ERROR: KEEP_LAST must be a non-negative integer (got: $KEEP_LAST)"
+    exit 2
+  fi
+  mapfile -t steps < <(list_finalized_steps)
+  n="${#steps[@]}"
+  if [[ "$n" -eq 0 ]]; then
+    log "local prune: no finalized steps"
+    return 0
+  fi
+  if [[ "$n" -le "$KEEP_LAST" ]]; then
+    log "local prune: ${n} finalized step(s) <= KEEP_LAST=${KEEP_LAST}; nothing to delete"
+    return 0
+  fi
+  keep_from=$((n - KEEP_LAST))
+  for ((i = 0; i < keep_from; i++)); do
+    step="${steps[i]}"
+    path="${EXP_DIR}/${step}"
+    if [[ ! "$step" =~ ^[0-9]+$ ]]; then
+      log "ERROR: refuse prune non-digit path: $path"
+      exit 2
+    fi
+    if [[ "$path" == *orbax-checkpoint-tmp* ]]; then
+      log "ERROR: refuse prune tmp-looking path: $path"
+      exit 2
+    fi
+    if ! already_synced "$step"; then
+      log "local prune: keep ${step} (not in state / not uploaded yet)"
+      continue
+    fi
+    verify_step_on_hub "$step"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      log "DRY_RUN would rm -rf $path (Hub verified; KEEP_LAST=$KEEP_LAST)"
+      continue
+    fi
+    log "local prune: rm -rf $path (Hub verified; KEEP_LAST=$KEEP_LAST)"
+    rm -rf "$path"
+  done
+}
+
+# Pull a finalized step from Hub into EXP_DIR for resume when local was pruned.
+download_step_from_hub() {
+  local step="$1"
+  local dest="${EXP_DIR}/${step}"
+  if [[ ! "$step" =~ ^[0-9]+$ ]]; then
+    log "ERROR: download step must be digits (got: $step)"
+    exit 2
+  fi
+  require_hf_creds
+  verify_step_on_hub "$step"
+  if [[ -d "$dest/params" ]]; then
+    log "ERROR: local finalized ${dest} already exists; refuse overwrite"
+    exit 2
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "DRY_RUN would: hf download $HF_MODEL_REPO --include ${step}/** --local-dir $EXP_DIR"
+    return 0
+  fi
+  mkdir -p "$EXP_DIR"
+  log "downloading Hub ${step}/ -> $EXP_DIR ..."
+  "$HF_BIN" download "$HF_MODEL_REPO" \
+    --repo-type "$REPO_TYPE" \
+    --token "$HF_TOKEN" \
+    --include "${step}/**" \
+    --local-dir "$EXP_DIR"
+  if ! is_finalized_ckpt "$dest"; then
+    log "ERROR: after download, ${dest} is not a finalized ckpt (missing params/)"
+    exit 3
+  fi
+  log "download ok: $dest"
+}
+
 sync_once() {
   local step stage
   local any=0
@@ -181,7 +325,10 @@ sync_once() {
     rm -rf "$stage"
     upload_small_artifacts "step_${step}"
     if [[ "$DRY_RUN" != "1" ]]; then
+      verify_step_on_hub "$step"
       mark_synced "$step"
+    else
+      log "DRY_RUN skip mark_synced / Hub verify for step $step"
     fi
     log "done step $step"
   done < <(list_finalized_steps)
@@ -189,6 +336,9 @@ sync_once() {
   if [[ "$any" -eq 0 ]]; then
     log "no finalized numbered ckpt yet under $EXP_DIR (tmp dirs ignored)"
   fi
+
+  # Prune after this poll's uploads so Hub verify for new steps is already done.
+  prune_older_local_ckpts
 }
 
 case "$MODE" in
@@ -198,8 +348,8 @@ case "$MODE" in
     ;;
   watch)
     require_hf_creds
-    log "watch start EXP_DIR=$EXP_DIR REPO=$HF_MODEL_REPO POLL=${POLL_SEC}s INCLUDE_TRAIN_STATE=$INCLUDE_TRAIN_STATE DRY_RUN=$DRY_RUN"
-    log "policy: sync digit dirs with params/ only; never touch *orbax-checkpoint-tmp*"
+    log "watch start EXP_DIR=$EXP_DIR REPO=$HF_MODEL_REPO POLL=${POLL_SEC}s INCLUDE_TRAIN_STATE=$INCLUDE_TRAIN_STATE DRY_RUN=$DRY_RUN PRUNE_LOCAL=$PRUNE_LOCAL KEEP_LAST=$KEEP_LAST"
+    log "policy: sync digit dirs with params/ only; never touch *orbax-checkpoint-tmp*; prune only after Hub verify"
     while true; do
       sync_once
       sleep "$POLL_SEC"
@@ -209,6 +359,7 @@ case "$MODE" in
     log "finalized steps under $EXP_DIR:"
     list_finalized_steps | sed 's/^/  /' || true
     log "state file: $STATE_FILE"
+    log "prune: PRUNE_LOCAL=$PRUNE_LOCAL KEEP_LAST=$KEEP_LAST"
     while read -r step; do
       if already_synced "$step"; then
         echo "  $step SYNCED"
@@ -217,8 +368,15 @@ case "$MODE" in
       fi
     done < <(list_finalized_steps)
     ;;
+  download)
+    if [[ -z "$STEP_ARG" ]]; then
+      echo "usage: $0 download <step>" >&2
+      exit 1
+    fi
+    download_step_from_hub "$STEP_ARG"
+    ;;
   *)
-    echo "usage: $0 {watch|once|list}" >&2
+    echo "usage: $0 {watch|once|list|download <step>}" >&2
     exit 1
     ;;
 esac

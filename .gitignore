@@ -34,3 +34,7 @@ openpi-cache/
 *.npz
 
 # Tracked session notes live in docs/ (not doc/)
+
+# HF creds for AutoDL sidecar (never commit)
+.hf_autodl_env
+**/.hf_autodl_env

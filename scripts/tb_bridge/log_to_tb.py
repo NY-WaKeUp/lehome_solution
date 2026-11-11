@@ -7,6 +7,10 @@ AutoDL AutoPanel TensorBoard (pinned to /root/tf-logs, port 6007) shows curves.
 Console metric lines only appear every config.log_interval (default 100). Between
 those Step lines we carry forward the last known full metric set onto Progress it
 so every train/* curve keeps updating in TB.
+
+If the train log is truncated or the step counter regresses (job reopen), in-memory
+gates (written_metric_steps / last_progress / last_it) are reset so Progress carry
+and progress/it resume on the new run instead of staying stuck on the old high steps.
 """
 from __future__ import annotations
 
@@ -45,6 +49,30 @@ def write_metrics(writer: SummaryWriter, step: int, metrics: dict, prefix: str =
         writer.add_scalar("loss", metrics["loss"], step)
 
 
+def _reset_runtime_for_restart(runtime: dict, key: str, reason: str) -> None:
+    # Clear step gates after a train log restart so Progress carry resumes.
+    runtime["last_progress"][key] = -10**9
+    runtime["last_metric_prog"][key] = -10**9
+    runtime["written_metric_steps"] = set()
+    runtime["last_it"] = -1
+    runtime["last_metrics"] = {}
+    print(f"[log_to_tb] restart-reset key={key} reason={reason}", flush=True)
+
+
+def _maybe_reset_on_regression(runtime: dict, key: str, step: int, name: str) -> bool:
+    # If step counter went backwards vs path cursor / global last_it, reset.
+    prev_it = runtime["last_progress"].get(key, -10**9)
+    last_it = runtime.get("last_it", -1)
+    if (prev_it > -10**8 and step + 5 < prev_it) or (last_it >= 0 and step + 50 < last_it):
+        _reset_runtime_for_restart(
+            runtime,
+            key,
+            reason=f"step_regression:{name}:step={step}:prev_it={prev_it}:last_it={last_it}",
+        )
+        return True
+    return False
+
+
 def ingest_file(
     path: Path,
     writer: SummaryWriter,
@@ -68,11 +96,17 @@ def ingest_file(
     if not path.exists():
         return 0, seen_max
     size = path.stat().st_size
-    if size < offset:
-        offset = 0
     last_progress: dict = runtime["last_progress"]
     last_metric_prog: dict = runtime["last_metric_prog"]
     written_metric_steps: set = runtime["written_metric_steps"]
+
+    # Truncation (train restart rewrote the log) => re-read from 0 and reset
+    # in-memory step gates; otherwise Progress carry / progress/it stay stuck
+    # on the previous run's high steps while new Step lines are sparse.
+    if size < offset:
+        offset = 0
+        _reset_runtime_for_restart(runtime, key, reason=f"truncate:{path.name}")
+        written_metric_steps = runtime["written_metric_steps"]
 
     with path.open("r", errors="replace") as f:
         f.seek(offset)
@@ -82,10 +116,12 @@ def ingest_file(
                 step, metrics = step_parsed
                 if max_step is not None and step > max_step:
                     continue
+                if _maybe_reset_on_regression(runtime, key, step, path.name):
+                    written_metric_steps = runtime["written_metric_steps"]
                 seen_max = max(seen_max, step)
                 if metrics:
                     runtime["last_metrics"] = dict(metrics)
-                    runtime["last_it"] = max(runtime.get("last_it", -1), step)
+                    runtime["last_it"] = step
                     write_metrics(writer, step, metrics)
                     written_metric_steps.add(step)
                     written += 1
@@ -96,7 +132,9 @@ def ingest_file(
                 step = int(float(pm.group(1)))
                 if max_step is not None and step > max_step:
                     continue
-                runtime["last_it"] = max(runtime.get("last_it", -1), step)
+                if _maybe_reset_on_regression(runtime, key, step, path.name):
+                    written_metric_steps = runtime["written_metric_steps"]
+                runtime["last_it"] = step
                 prev_it = last_progress.get(key, -10**9)
                 if step - prev_it >= PROGRESS_IT_EVERY:
                     writer.add_scalar("progress/it", step, step)
