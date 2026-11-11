@@ -1,0 +1,36 @@
+#!/bin/bash
+set -uo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+export OPENPI_DATA_HOME=/root/autodl-tmp/openpi-cache
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HOME=/root/autodl-tmp/hf-home
+export PYTHONUNBUFFERED=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
+cd /root/autodl-tmp/lehome_solution
+RESULT=/root/autodl-tmp/batch_smoke_results.md
+LOG=/root/autodl-tmp/smoke_b192.log
+VRAM=/root/autodl-tmp/vram_192.csv
+echo "# A800 batch=192 measure $(date -Is)" > "$RESULT"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | tee -a "$RESULT"
+# sample VRAM every 2s
+( while true; do nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu --format=csv,noheader; sleep 2; done ) > "$VRAM" &
+VPID=$!
+# steps_per_iteration 8 -> target ~9 steps for better timing after JIT
+.venv/bin/python -u scripts/run_rl_pipeline.py \
+  --config=configs/rl_pipeline_sim.yaml \
+  --train_only \
+  --steps_per_iteration 8 \
+  --batch_size 192 \
+  > "$LOG" 2>&1
+EC=$?
+kill $VPID 2>/dev/null || true
+echo "exit=$EC" | tee -a "$RESULT"
+grep -E "Progress on:|loss|Step " "$LOG" | tail -40 | tee -a "$RESULT" || true
+tail -20 /root/autodl-tmp/lehome_solution/outputs/checkpoints/pi_modified_bc_rl/sim_rl/logs/training/train_iter0.log | tee -a "$RESULT"
+# peak VRAM from samples
+awk -F"," "BEGIN{max=0} {gsub(/ MiB/,\"\",\$2); if(\$2+0>max)max=\$2+0} END{print \"peak_vram_mib=\" max}" "$VRAM" | tee -a "$RESULT"
+echo "DONE_SMOKE $(date -Is)" | tee -a "$RESULT"
+# delete large ckpt again to keep disk
+rm -rf /root/autodl-tmp/lehome_solution/outputs/checkpoints/pi_modified_bc_rl/sim_rl/[0-9]*
+df -h /root/autodl-tmp | tee -a "$RESULT"
