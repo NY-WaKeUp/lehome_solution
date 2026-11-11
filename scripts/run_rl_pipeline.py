@@ -379,15 +379,7 @@ def build_train_config(pipeline_cfg: RLPipelineConfig, state: dict):
     if aux_overrides:
         model = dataclasses.replace(model, **aux_overrides)
 
-    # Local 24GB×2 warmup: drop keypoint/WM heads to shrink the train-step graph.
-    # Re-enable for full sim recipe once VRAM path is proven.
-    model = dataclasses.replace(
-        model,
-        use_keypoint_distance_head=False,
-        use_wm_fast_head=False,
-        use_wm_flow_head=False,
-    )
-
+    # A800 1x80GB: keep model heads; single-device FSDP; Ilia flow samples=5.
     return dataclasses.replace(
         base,
         data=new_data,
@@ -404,11 +396,12 @@ def build_train_config(pipeline_cfg: RLPipelineConfig, state: dict):
         assets_base_dir=checkpoint_assets,
         use_flash_attention=pipeline_cfg.use_flash_attention,
         use_xsa=pipeline_cfg.use_xsa,
-        # Dual-GPU FSDP to fit params/opt; tiny batch for activation VRAM.
         ema_decay=None,
-        fsdp_devices=2,
-        num_flow_samples=1,
+        fsdp_devices=1,
+        num_flow_samples=5,
+        num_workers=2,  # keep dataloader fork RAM modest on 120GiB cgroup
     )
+
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +428,51 @@ def find_latest_checkpoint_step(checkpoint_dir: str) -> int | None:
 # Training
 # ---------------------------------------------------------------------------
 
+def _ensure_checkpoint_assets(pipeline_cfg: RLPipelineConfig, state: dict) -> None:
+    """Seed norm_stats + FAST tokenizer into checkpoint_dir/assets/<asset_id>.
+
+    train configs force AssetsConfig.assets_dir to checkpoint_dir/assets so each
+    exp is self-contained. Fresh --exp_name dirs start empty; without this seed
+    train.py raises ValueError: Normalization stats not found.
+    """
+    import shutil
+    from lehome_solution.training.config import get_config
+
+    ckpt_dir = Path(state["checkpoint_dir"])
+    base = get_config(pipeline_cfg.config_name)
+    asset_id = base.data.assets.asset_id or "sim_rl"
+    dest = ckpt_dir / "assets" / asset_id
+    if (dest / "norm_stats.json").is_file():
+        return
+
+    candidates = [
+        REPO_ROOT / "outputs" / "assets" / pipeline_cfg.config_name / asset_id,
+        REPO_ROOT / "outputs" / "checkpoints" / pipeline_cfg.config_name / "sim_rl" / "assets" / asset_id,
+    ]
+    siblings_root = REPO_ROOT / "outputs" / "checkpoints" / pipeline_cfg.config_name
+    if siblings_root.is_dir():
+        for sib in sorted(siblings_root.iterdir()):
+            candidates.append(sib / "assets" / asset_id)
+
+    src = next((c for c in candidates if (c / "norm_stats.json").is_file()), None)
+    if src is None:
+        raise FileNotFoundError(
+            f"norm_stats.json not found for asset_id={asset_id}; searched: "
+            + ", ".join(str(c) for c in candidates)
+        )
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest)
+    logger.info("Seeded checkpoint assets from %s -> %s", src, dest)
+
+
 def run_training(pipeline_cfg: RLPipelineConfig, state: dict) -> bool:
     """Run training subprocess. Returns True on success."""
-    
+
+    _ensure_checkpoint_assets(pipeline_cfg, state)
+
     # Clear HF datasets cache to avoid stale arrow files after parquet rewrites
     import shutil
     hf_cache = Path.home() / ".cache" / "huggingface" / "datasets"

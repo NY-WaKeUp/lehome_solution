@@ -23,7 +23,7 @@ num_iterations: 300
 steps_per_iteration: 1000
 
 # Rollout collection
-num_workers: 4
+num_workers: 2
 camera_width: 640
 camera_height: 480
 dataset_width: 320
@@ -167,8 +167,8 @@ wandb_enabled: false
 
 # Training overrides
 batch_size: 192
-save_interval: 500
-keep_period: 5000
+save_interval: 1000
+keep_period: null
 
 # Training-time image + state augmentations applied inside compute_detailed_loss.
 # The sim round ran with the dataclass defaults (shared-camera color jitter +

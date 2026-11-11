@@ -18,5 +18,12 @@ submission/
 diag_out/
 .claude/
 
-# Local conversation notes
+# Local conversation notes (tracked notes go in docs/)
 doc/
+*.orbax*
+uv-cache/
+hf-home/
+openpi-cache/
+*.ckpt
+*.safetensors
+!docs/
