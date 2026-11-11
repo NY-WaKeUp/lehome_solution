@@ -18,7 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 STEP_RE = re.compile(r"Step\s+(\d+):\s*(.*)")
 KV_RE = re.compile(r"([A-Za-z0-9_./]+)=([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)")
-PROGRESS_RE = re.compile(r"Progress on:\s+(\d+)it/")
+PROGRESS_RE = re.compile(r"Progress on:\s+(\d+(?:\.\d+)?)it/")
 TIMING_RE = re.compile(
     r"TIMING \[last 10 steps\]:\s*gpu=([0-9.]+)s,\s*data=([0-9.]+)s,\s*total=([0-9.]+)s/step"
 )
@@ -71,13 +71,14 @@ def ingest_file(
                 continue
             pm = PROGRESS_RE.search(line)
             if pm:
-                step = int(pm.group(1))
+                step = int(float(pm.group(1)))
                 if max_step is not None and step > max_step:
                     continue
                 prev = last_progress.get(key, -10)
                 if step - prev >= 10:
                     writer.add_scalar("progress/it", step, step)
                     last_progress[key] = step
+                    written += 1
                 continue
             tm = TIMING_RE.search(line)
             if tm:
@@ -85,13 +86,14 @@ def ingest_file(
                 writer.add_scalar("timing/gpu_s", float(tm.group(1)), step)
                 writer.add_scalar("timing/data_s", float(tm.group(2)), step)
                 writer.add_scalar("timing/total_s_per_step", float(tm.group(3)), step)
+                written += 1
         state[key] = f.tell()
     return written, seen_max
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--logdir", default="/root/tf-logs/sim_rl_awr_sample_b128")
+    ap.add_argument("--logdir", default="/root/tf-logs/sim_rl_awr_sample_b192")
     ap.add_argument("--poll", type=float, default=5.0)
     ap.add_argument("--once", action="store_true")
     ap.add_argument(
