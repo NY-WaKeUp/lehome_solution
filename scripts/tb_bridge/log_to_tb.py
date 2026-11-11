@@ -4,8 +4,9 @@
 Does not touch the training process. Tails log files and writes scalars so
 AutoDL AutoPanel TensorBoard (pinned to /root/tf-logs, port 6007) shows curves.
 
-For a resume run, pass historical logs with --max-step <resume_ckpt_step> so
-pre-crash steps beyond the checkpoint do not pollute the x-axis.
+Console loss lines only appear every config.log_interval (default 100). Between
+those Step lines we carry forward the last known metrics onto Progress it so
+the loss curve keeps updating in TB.
 """
 from __future__ import annotations
 
@@ -22,6 +23,10 @@ PROGRESS_RE = re.compile(r"Progress on:\s+(\d+(?:\.\d+)?)it/")
 TIMING_RE = re.compile(
     r"TIMING \[last 10 steps\]:\s*gpu=([0-9.]+)s,\s*data=([0-9.]+)s,\s*total=([0-9.]+)s/step"
 )
+
+# Prefer dense progress-driven loss points; Step lines still win when present.
+PROGRESS_LOSS_EVERY = 1
+PROGRESS_IT_EVERY = 1
 
 
 def parse_step_line(line: str):
@@ -44,9 +49,18 @@ def ingest_file(
     path: Path,
     writer: SummaryWriter,
     state: dict,
-    last_progress: dict,
+    runtime: dict,
     max_step: int | None,
 ) -> tuple[int, int]:
+    """Ingest new bytes from one log file.
+
+    runtime keys:
+      last_progress[path] -> last progress it written for progress/it
+      last_loss_prog[path] -> last progress it used for carry-forward loss
+      last_metrics -> shared last Step metrics dict
+      last_it -> shared latest progress it (for TIMING x-axis)
+      written_loss_steps -> set of steps that already got a real/carried loss
+    """
     written = 0
     seen_max = -1
     key = str(path)
@@ -56,6 +70,10 @@ def ingest_file(
     size = path.stat().st_size
     if size < offset:
         offset = 0
+    last_progress: dict = runtime["last_progress"]
+    last_loss_prog: dict = runtime["last_loss_prog"]
+    written_loss_steps: set = runtime["written_loss_steps"]
+
     with path.open("r", errors="replace") as f:
         f.seek(offset)
         for line in f:
@@ -66,23 +84,48 @@ def ingest_file(
                     continue
                 seen_max = max(seen_max, step)
                 if metrics:
+                    runtime["last_metrics"] = dict(metrics)
+                    runtime["last_it"] = max(runtime.get("last_it", -1), step)
                     write_metrics(writer, step, metrics)
+                    written_loss_steps.add(step)
                     written += 1
                 continue
+
             pm = PROGRESS_RE.search(line)
             if pm:
                 step = int(float(pm.group(1)))
                 if max_step is not None and step > max_step:
                     continue
-                prev = last_progress.get(key, -10)
-                if step - prev >= 10:
+                runtime["last_it"] = max(runtime.get("last_it", -1), step)
+                prev_it = last_progress.get(key, -10**9)
+                if step - prev_it >= PROGRESS_IT_EVERY:
                     writer.add_scalar("progress/it", step, step)
                     last_progress[key] = step
                     written += 1
+                # Carry forward last known loss so TB loss keeps moving before
+                # the next log_interval Step line arrives.
+                metrics = runtime.get("last_metrics") or {}
+                prev_loss_it = last_loss_prog.get(key, -10**9)
+                if (
+                    metrics
+                    and "loss" in metrics
+                    and step - prev_loss_it >= PROGRESS_LOSS_EVERY
+                    and step not in written_loss_steps
+                ):
+                    writer.add_scalar("loss", metrics["loss"], step)
+                    writer.add_scalar("train/loss", metrics["loss"], step)
+                    if "action_loss" in metrics:
+                        writer.add_scalar(
+                            "train/action_loss", metrics["action_loss"], step
+                        )
+                    last_loss_prog[key] = step
+                    written_loss_steps.add(step)
+                    written += 1
                 continue
+
             tm = TIMING_RE.search(line)
             if tm:
-                step = last_progress.get(key, 0)
+                step = runtime.get("last_it", 0)
                 writer.add_scalar("timing/gpu_s", float(tm.group(1)), step)
                 writer.add_scalar("timing/data_s", float(tm.group(2)), step)
                 writer.add_scalar("timing/total_s_per_step", float(tm.group(3)), step)
@@ -117,7 +160,13 @@ def main():
     logdir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(logdir))
     state: dict = {}
-    last_progress: dict = {}
+    runtime = {
+        "last_progress": {},
+        "last_loss_prog": {},
+        "last_metrics": {},
+        "last_it": -1,
+        "written_loss_steps": set(),
+    }
     total_writes = 0
     global_max = -1
 
@@ -128,16 +177,20 @@ def main():
     while True:
         batch = 0
         for p, cap in zip(args.logs, caps):
-            n, mx = ingest_file(Path(p), writer, state, last_progress, cap)
+            n, mx = ingest_file(Path(p), writer, state, runtime, cap)
             batch += n
             if mx >= 0:
                 global_max = max(global_max, mx)
         if batch:
             writer.flush()
             total_writes += batch
+            loss_steps = sorted(runtime["written_loss_steps"])
+            last_loss = (runtime.get("last_metrics") or {}).get("loss")
             print(
                 f"[log_to_tb] wrote {batch} step-lines; "
-                f"total_writes={total_writes}; max_step={global_max}",
+                f"total_writes={total_writes}; max_step={global_max}; "
+                f"loss_points={len(loss_steps)}; last_loss={last_loss}; "
+                f"last_it={runtime.get('last_it')}",
                 flush=True,
             )
         if args.once:
