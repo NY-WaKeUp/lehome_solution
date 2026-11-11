@@ -379,7 +379,8 @@ def build_train_config(pipeline_cfg: RLPipelineConfig, state: dict):
     if aux_overrides:
         model = dataclasses.replace(model, **aux_overrides)
 
-    # A800 1x80GB: keep model heads; single-device FSDP; Ilia flow samples=5.
+    # Train dynamics aligned to Ilia defaults: ema_decay from TrainConfig (0.99),
+    # dataloader num_workers from _BASE_TRAIN_CONFIG (8), flow/fsdp from base.
     return dataclasses.replace(
         base,
         data=new_data,
@@ -396,10 +397,6 @@ def build_train_config(pipeline_cfg: RLPipelineConfig, state: dict):
         assets_base_dir=checkpoint_assets,
         use_flash_attention=pipeline_cfg.use_flash_attention,
         use_xsa=pipeline_cfg.use_xsa,
-        ema_decay=None,
-        fsdp_devices=1,
-        num_flow_samples=5,
-        num_workers=2,  # keep dataloader fork RAM modest on 120GiB cgroup
     )
 
 

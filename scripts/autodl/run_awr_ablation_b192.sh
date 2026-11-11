@@ -28,11 +28,11 @@ mkdir -p /root/autodl-tmp/ablation logs
 {
   echo "# AWR ablation on A800 (batch=192, Ilia-aligned)"
   echo "started: $(date -Is)"
-  echo "batch_size=$BATCH steps_per_iteration=$STEPS fsdp=1 flow_samples=5 num_workers=2"
+  echo "batch_size=$BATCH steps_per_iteration=$STEPS fsdp=1 flow_samples=5 num_workers_dl=8 ema=0.99 use_xsa=true"
   echo "MAX_OK=192 (probe 160/176/192 all OK; peak~70GB VRAM / ~83GiB cgroup)"
   echo "fresh_start: new exp names; do NOT hard-resume b128/ckpt500 into different batch"
   echo "history_kept: sim_rl_awr_sample_b128/500 (~12G) retained as archive"
-  echo "disk_policy: save_interval=1000 keep_period=null max_to_keep=1 disk_guard thresh=15G"
+  echo "disk_policy: save_interval=500 keep_period=5000 max_to_keep=1 disk_guard thresh=15G"
   echo "fix: seed checkpoint assets (norm_stats) for fresh --exp_name"
 } > "$STATUS"
 
@@ -64,7 +64,7 @@ clean_b192_numbered() {
     rm -f "$BASE/$EXP"/_pipeline_config_iter*.pkl
   fi
   # other b192 arms' numbered ckpts to free disk when switching arms
-  for other in sim_rl_awr_sample_b192 sim_rl_awr_loss_b192; do
+  for other in sim_rl_awr_sample_b192 sim_rl_awr_sample_b192_vanilla sim_rl_awr_loss_b192; do
     if [ "$other" != "$EXP" ] && [ -d "$BASE/$other" ]; then
       find "$BASE/$other" -maxdepth 1 -type d -regex ".*/[0-9]+" -exec rm -rf {} + 2>/dev/null || true
     fi
@@ -91,7 +91,6 @@ run_arm() {
     --steps_per_iteration "$STEPS" \
     --batch_size "$BATCH" \
     --exp_name "$EXP" \
-    --num_workers 2 \
     > "$LOG" 2>&1
   EC=$?
   set -e
@@ -103,7 +102,7 @@ run_arm() {
 }
 
 # baseline: sampler AWR (awr_loss_weighted=false)
-run_arm baseline configs/rl_pipeline_sim.yaml sim_rl_awr_sample_b192
+run_arm baseline configs/rl_pipeline_sim.yaml sim_rl_awr_sample_b192_vanilla
 BASE_EC=$?
 
 # loss-weighted AWR

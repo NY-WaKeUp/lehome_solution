@@ -36,7 +36,6 @@ from lehome_solution.shared import normalize as _normalize
 from lehome_solution.training import weight_loaders
 from lehome_solution import transforms as lehome_transforms
 from lehome_solution.constants import ACTION_HORIZON, ACTION_DIM
-import jax.numpy as jnp
 
 ModelType: TypeAlias = _model.ModelType
 
@@ -115,8 +114,7 @@ class AdamWWithAuxDecay(_optimizer.OptimizerConfig):
     ) -> optax.GradientTransformation:
         chain: list[optax.GradientTransformation] = [
             optax.clip_by_global_norm(self.clip_gradient_norm),
-            # mu in bf16 halves first-moment VRAM (legacy AdamWBF16 behavior).
-            optax.scale_by_adam(b1=self.b1, b2=self.b2, eps=self.eps, mu_dtype=jnp.bfloat16),
+            optax.scale_by_adam(b1=self.b1, b2=self.b2, eps=self.eps),
             optax.add_decayed_weights(self.weight_decay),
         ]
         if weight_decay_mask is not None and self.aux_head_weight_decay > 0:

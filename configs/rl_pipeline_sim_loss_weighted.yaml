@@ -23,7 +23,7 @@ num_iterations: 300
 steps_per_iteration: 1000
 
 # Rollout collection
-num_workers: 2
+num_workers: 4
 camera_width: 640
 camera_height: 480
 dataset_width: 320
@@ -39,7 +39,7 @@ save_debug_video: true  # 3-cam grid + overlay video per episode (320x240, human
 use_advantage_embedding: true  # Enable advantage embedding conditioning in model
 freeze_vision_backbone: true   # Keep SigLIP vision encoder frozen
 use_flash_attention: true  # flash attention (~6% speedup over vanilla)
-use_xsa: false              # Exclusive Self Attention (https://arxiv.org/abs/2603.09078)
+use_xsa: true              # Exclusive Self Attention (https://arxiv.org/abs/2603.09078)
 
 # Auxiliary loss weights (main flow-matching `action` loss is always 1.0).
 # Any field omitted / set to null inherits the model's dataclass default.
@@ -167,8 +167,8 @@ wandb_enabled: false
 
 # Training overrides
 batch_size: 192
-save_interval: 1000
-keep_period: null
+save_interval: 500
+keep_period: 5000
 
 # Training-time image + state augmentations applied inside compute_detailed_loss.
 # The sim round ran with the dataclass defaults (shared-camera color jitter +
